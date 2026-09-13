@@ -1,1 +1,121 @@
+on:
+  workflow_dispatch:
 
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+    steps:
+
+      - name: 1. Enable Remote Desktop & Firewall
+        shell: powershell
+        run: |
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name 'fDenyTSConnections' `
+            -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+      - name: 2. Create Admin Account
+        shell: powershell
+        run: |
+          $username = "nwdAdmin"
+
+          # Generate a random password
+          $chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*"
+
+          $passwordPlain = -join (1..20 | ForEach-Object {
+              $chars[(Get-Random -Maximum $chars.Length)]
+          })
+
+          $password = ConvertTo-SecureString `
+            $passwordPlain `
+            -AsPlainText `
+            -Force
+
+          $existingUser = Get-LocalUser `
+            -Name $username `
+            -ErrorAction SilentlyContinue
+
+          if ($existingUser) {
+              Set-LocalUser `
+                -Name $username `
+                -Password $password
+          }
+          else {
+              New-LocalUser `
+                -Name $username `
+                -Password $password `
+                -FullName "RDP Administrator" `
+                -Description "Temporary RDP account"
+          }
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $username `
+            -ErrorAction SilentlyContinue
+
+          Write-Host ""
+          Write-Host "==========================================" -ForegroundColor Green
+          Write-Host "       RDP ACCOUNT CREATED" -ForegroundColor Cyan
+          Write-Host "==========================================" -ForegroundColor Green
+          Write-Host "Username : $username" -ForegroundColor Yellow
+          Write-Host "Password : $passwordPlain" -ForegroundColor Yellow
+          Write-Host "==========================================" -ForegroundColor Green
+
+      - name: 3. Download and Install Tailscale
+        shell: powershell
+        run: |
+          Invoke-WebRequest `
+            "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" `
+            -OutFile "C:\tailscale.msi"
+
+          Start-Process `
+            msiexec.exe `
+            -ArgumentList "/i C:\tailscale.msi /quiet /norestart" `
+            -Wait
+
+      - name: 4. Connect to Tailscale
+        shell: powershell
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTHKEY)) {
+              throw "TAILSCALE_AUTHKEY secret is empty."
+          }
+
+          Start-Sleep -Seconds 5
+
+          & "C:\Program Files\Tailscale\tailscale.exe" up `
+            --authkey="$env:TAILSCALE_AUTHKEY" `
+            --hostname="github-rdp-server"
+
+          Start-Sleep -Seconds 8
+
+      - name: 5. Get Tailscale IP
+        shell: powershell
+        run: |
+          $ts_ip = & `
+            "C:\Program Files\Tailscale\tailscale.exe" `
+            ip -4
+
+          Write-Host ""
+          Write-Host "==========================================" -ForegroundColor Green
+          Write-Host "          RDP SERVER IS READY" -ForegroundColor Cyan
+          Write-Host "==========================================" -ForegroundColor Green
+          Write-Host "Tailscale IP : $ts_ip" -ForegroundColor Yellow
+          Write-Host "Username     : nwdAdmin" -ForegroundColor Yellow
+          Write-Host ""
+          Write-Host "Use Windows Remote Desktop (mstsc)" -ForegroundColor Magenta
+          Write-Host "==========================================" -ForegroundColor Green
+
+      - name: 6. Keep Server Alive
+        shell: powershell
+        run: |
+          for ($i = 1; $i -le 360; $i++) {
+              Start-Sleep -Seconds 60
+              Write-Host "[$i/360] Server running..."
+          
